@@ -1,0 +1,346 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Venetian Plaster Room Visualizer</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/tailwindcss/2.2.19/tailwind.min.js"></script>
+  <style>
+    body { margin: 0; overflow: hidden; }
+    #renderer { width: 100vw; height: 100vh; }
+    #controls { position: absolute; top: 10px; left: 10px; background: rgba(255, 255, 255, 0.9); padding: 10px; border-radius: 5px; z-index: 10; }
+    #controls select, #controls input, #controls button { margin: 5px; padding: 5px; }
+    #drawCanvas { position: absolute; top: 0; left: 0; pointer-events: none; }
+    .drawing { pointer-events: auto !important; }
+  </style>
+</head>
+<body>
+  <div id="controls" class="text-sm">
+    <h2 class="text-lg font-bold">Venetian Plaster Visualizer</h2>
+    <div>
+      <label>Selected Wall:</label>
+      <span id="selectedWall">None</span>
+    </div>
+    <div>
+      <label>Plaster Texture:</label>
+      <select id="textureSelect">
+        <option value="smooth">Smooth</option>
+        <option value="textured">Textured</option>
+        <option value="marble">Marble Effect</option>
+        <option value="custom">Custom Image</option>
+      </select>
+    </div>
+    <div id="customTexture" style="display: none;">
+      <label>Upload Texture:</label>
+      <input type="file" id="textureUpload" accept="image/*">
+      <label>Take Photo (Mobile):</label>
+      <input type="file" id="textureCapture" accept="image/*" capture="environment">
+    </div>
+    <div>
+      <label>Plaster Color:</label>
+      <select id="colorSelect">
+        <option value="#e0d8c3">Cream</option>
+        <option value="#d3d3d3">Soft Gray</option>
+        <option value="#f5e6cc">Warm Beige</option>
+        <option value="#2a4d69">Deep Blue</option>
+      </select>
+      <label>Custom Color:</label>
+      <input type="color" id="colorPicker" value="#e0d8c3">
+    </div>
+    <div>
+      <label>Light Intensity:</label>
+      <input type="range" id="lightIntensity" min="0" max="2" step="0.1" value="1">
+    </div>
+    <div>
+      <label>Light Angle:</label>
+      <input type="range" id="lightAngle" min="0" max="360" step="1" value="45">
+    </div>
+    <div>
+      <button id="drawToggle" class="bg-blue-500 text-white px-2 py-1 rounded">Start Drawing</button>
+      <button id="clearDraw" class="bg-red-500 text-white px-2 py-1 rounded" style="display: none;">Clear Drawing</button>
+    </div>
+  </div>
+  <canvas id="drawCanvas"></canvas>
+  <div id="renderer"></div>
+  <script>
+    // Configuration object for easy customization
+    const config = {
+      companyName: "Your Plasterer", // Change for each client
+      logoUrl: "", // Add logo URL or leave empty
+      textures: {
+        smooth: { color: 0xe0d8c3, roughness: 0.5, metalness: 0.1 },
+        textured: { color: 0xe0d8c3, roughness: 0.7, metalness: 0.05 },
+        marble: { color: 0xe0d8c3, roughness: 0.3, metalness: 0.2 },
+        custom: { color: 0xe0d8c3, roughness: 0.5, metalness: 0.1, map: null }
+      },
+      colors: {
+        cream: '#e0d8c3',
+        softGray: '#d3d3d3',
+        warmBeige: '#f5e6cc',
+        deepBlue: '#2a4d69'
+      }
+    };
+
+    // Three.js setup
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+    const renderer = new THREE.WebGLRenderer();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    document.getElementById('renderer').appendChild(renderer.domElement);
+
+    // Room geometry
+    const roomGeometry = new THREE.BoxGeometry(10, 5, 10);
+    const baseMaterial = new THREE.MeshStandardMaterial({ color: 0xe0d8c3, roughness: 0.5, metalness: 0.1 });
+    const floorMaterial = new THREE.MeshStandardMaterial({ color: 0xcccccc });
+    const wallMaterials = [
+      baseMaterial.clone(), // right
+      baseMaterial.clone(), // left
+      baseMaterial.clone(), // top
+      floorMaterial,        // bottom
+      baseMaterial.clone(), // front
+      baseMaterial.clone()  // back
+    ];
+    const room = new THREE.Mesh(roomGeometry, wallMaterials);
+    scene.add(room);
+
+    // Wall outline for highlighting
+    const edges = new THREE.EdgesGeometry(roomGeometry);
+    const outlineMaterial = new THREE.LineBasicMaterial({ color: 0xff0000, linewidth: 2 });
+    const outline = new THREE.LineSegments(edges, outlineMaterial);
+    outline.visible = false;
+    scene.add(outline);
+
+    // Lighting
+    const ambientLight = new THREE.AmbientLight(0xffffff, 0.3);
+    scene.add(ambientLight);
+    const directionalLight = new THREE.DirectionalLight(0xffffff, 1);
+    directionalLight.position.set(5, 5, 5);
+    scene.add(directionalLight);
+
+    // Camera position
+    camera.position.set(0, 2, 7);
+    camera.lookAt(0, 2, 0);
+
+    // Drawing canvas setup
+    const drawCanvas = document.getElementById('drawCanvas');
+    drawCanvas.width = window.innerWidth;
+    drawCanvas.height = window.innerHeight;
+    const ctx = drawCanvas.getContext('2d');
+    let isDrawing = false;
+    let drawing = false;
+
+    // Raycaster for wall selection
+    const raycaster = new THREE.Raycaster();
+    const mouse = new THREE.Vector2();
+    let selectedWallIndex = null;
+    const wallNames = ['Right Wall', 'Left Wall', 'Ceiling', 'Floor', 'Front Wall', 'Back Wall'];
+
+    // Controls
+    const textureSelect = document.getElementById('textureSelect');
+    const colorSelect = document.getElementById('colorSelect');
+    const colorPicker = document.getElementById('colorPicker');
+    const lightIntensity = document.getElementById('lightIntensity');
+    const lightAngle = document.getElementById('lightAngle');
+    const textureUpload = document.getElementById('textureUpload');
+    const textureCapture = document.getElementById('textureCapture');
+    const drawToggle = document.getElementById('drawToggle');
+    const clearDraw = document.getElementById('clearDraw');
+    const customTextureDiv = document.getElementById('customTexture');
+    const selectedWallSpan = document.getElementById('selectedWall');
+
+    // Texture handling
+    let currentTexture = null;
+    function loadTexture(file) {
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        const img = new Image();
+        img.src = e.target.result;
+        img.onload = () => {
+          currentTexture = new THREE.TextureLoader().load(img.src);
+          currentTexture.wrapS = currentTexture.wrapT = THREE.RepeatWrapping;
+          config.textures.custom.map = currentTexture;
+          if (selectedWallIndex !== null && selectedWallIndex !== 3) {
+            updateWall(selectedWallIndex);
+          }
+        };
+      };
+      reader.readAsDataURL(file);
+    }
+
+    textureUpload.addEventListener('change', (e) => {
+      if (e.target.files[0]) loadTexture(e.target.files[0]);
+    });
+    textureCapture.addEventListener('change', (e) => {
+      if (e.target.files[0]) loadTexture(e.target.files[0]);
+    });
+
+    // Update selected wall
+    function updateWall(wallIndex) {
+      if (wallIndex === 3) return; // Skip floor
+      const texture = config.textures[textureSelect.value];
+      const color = new THREE.Color(colorSelect.value || colorPicker.value);
+      const newMaterial = new THREE.MeshStandardMaterial({
+        color: color,
+        roughness: texture.roughness,
+        metalness: texture.metalness,
+        map: texture.map
+      });
+      wallMaterials[wallIndex] = newMaterial;
+      room.material = wallMaterials;
+      room.material.forEach(mat => mat.needsUpdate = true);
+    }
+
+    // Update light
+    function updateLight() {
+      directionalLight.intensity = parseFloat(lightIntensity.value);
+      const angle = THREE.MathUtils.degToRad(parseFloat(lightAngle.value));
+      directionalLight.position.set(5 * Math.cos(angle), 5, 5 * Math.sin(angle));
+    }
+
+    // Wall selection
+    function selectWall(event) {
+      if (drawing) return;
+      mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
+      mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
+      raycaster.setFromCamera(mouse, camera);
+      const intersects = raycaster.intersectObject(room);
+      if (intersects.length > 0) {
+        const faceIndex = intersects[0].face.materialIndex;
+        if (faceIndex !== 3) { // Exclude floor
+          selectedWallIndex = faceIndex;
+          selectedWallSpan.textContent = wallNames[faceIndex];
+          outline.visible = true;
+          outline.position.copy(room.position);
+          updateWall(faceIndex);
+        } else {
+          selectedWallIndex = null;
+          selectedWallSpan.textContent = 'None';
+          outline.visible = false;
+        }
+      }
+    }
+
+    // Drawing functionality
+    function startDrawing(e) {
+      if (!drawing || selectedWallIndex === null || selectedWallIndex === 3) return;
+      isDrawing = true;
+      ctx.beginPath();
+      const { x, y } = getMousePos(e);
+      ctx.moveTo(x, y);
+    }
+
+    function draw(e) {
+      if (!isDrawing || !drawing || selectedWallIndex === null || selectedWallIndex === 3) return;
+      const { x, y } = getMousePos(e);
+      ctx.lineTo(x, y);
+      ctx.strokeStyle = 'white';
+      ctx.lineWidth = 5;
+      ctx.stroke();
+
+      mouse.x = (x / window.innerWidth) * 2 - 1;
+      mouse.y = -(y / window.innerHeight) * 2 + 1;
+      raycaster.setFromCamera(mouse, camera);
+      const intersects = raycaster.intersectObject(room);
+      if (intersects.length > 0 && intersects[0].face.materialIndex === selectedWallIndex) {
+        const texture = config.textures[textureSelect.value];
+        const newMaterial = new THREE.MeshStandardMaterial({
+          color: new THREE.Color(colorSelect.value || colorPicker.value),
+          roughness: texture.roughness,
+          metalness: texture.metalness,
+          map: texture.map || new THREE.CanvasTexture(drawCanvas)
+        });
+        wallMaterials[selectedWallIndex] = newMaterial;
+        room.material = wallMaterials;
+        room.material.forEach(mat => mat.needsUpdate = true);
+      }
+    }
+
+    function stopDrawing() {
+      isDrawing = false;
+      ctx.closePath();
+    }
+
+    function getMousePos(e) {
+      const rect = drawCanvas.getBoundingClientRect();
+      const clientX = e.clientX || (e.touches && e.touches[0].clientX);
+      const clientY = e.clientY || (e.touches && e.touches[0].clientY);
+      return {
+        x: clientX - rect.left,
+        y: clientY - rect.top
+      };
+    }
+
+    // Event listeners
+    textureSelect.addEventListener('change', () => {
+      customTextureDiv.style.display = textureSelect.value === 'custom' ? 'block' : 'none';
+      if (selectedWallIndex !== null && selectedWallIndex !== 3) {
+        updateWall(selectedWallIndex);
+      }
+    });
+    colorSelect.addEventListener('change', () => {
+      colorPicker.value = colorSelect.value;
+      if (selectedWallIndex !== null && selectedWallIndex !== 3) {
+        updateWall(selectedWallIndex);
+      }
+    });
+    colorPicker.addEventListener('input', () => {
+      colorSelect.value = ''; // Reset dropdown when custom color is picked
+      if (selectedWallIndex !== null && selectedWallIndex !== 3) {
+        updateWall(selectedWallIndex);
+      }
+    });
+    lightIntensity.addEventListener('input', updateLight);
+    lightAngle.addEventListener('input', updateLight);
+    drawToggle.addEventListener('click', () => {
+      drawing = !drawing;
+      drawToggle.textContent = drawing ? 'Stop Drawing' : 'Start Drawing';
+      drawToggle.classList.toggle('bg-blue-500', !drawing);
+      drawToggle.classList.toggle('bg-gray-500', drawing);
+      clearDraw.style.display = drawing ? 'inline-block' : 'none';
+      drawCanvas.classList.toggle('drawing', drawing);
+    });
+    clearDraw.addEventListener('click', () => {
+      ctx.clearRect(0, 0, drawCanvas.width, drawCanvas.height);
+      if (selectedWallIndex !== null && selectedWallIndex !== 3) {
+        updateWall(selectedWallIndex);
+      }
+    });
+    renderer.domElement.addEventListener('click', selectWall);
+    drawCanvas.addEventListener('mousedown', startDrawing);
+    drawCanvas.addEventListener('mousemove', draw);
+    drawCanvas.addEventListener('mouseup', stopDrawing);
+    drawCanvas.addEventListener('touchstart', startDrawing);
+    drawCanvas.addEventListener('touchmove', draw);
+    drawCanvas.addEventListener('touchend', stopDrawing);
+
+    // Animation loop
+    function animate() {
+      requestAnimationFrame(animate);
+      renderer.render(scene, camera);
+    }
+    animate();
+
+    // Handle window resize
+    window.addEventListener('resize', () => {
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      drawCanvas.width = window.innerWidth;
+      drawCanvas.height = window.innerHeight;
+    });
+
+    // Instructions for customization
+    /*
+      To adapt for another plasterer:
+      1. Change config.companyName to the new company name.
+      2. Add a logo URL to config.logoUrl (optional).
+      3. Modify config.textures to include new texture properties (roughness, metalness, map).
+      4. Update textureSelect options to match config.textures keys.
+      5. Modify config.colors to include new plaster colors and update colorSelect options.
+      6. Adjust drawCanvas strokeStyle or lineWidth for different pencil effects.
+      7. Host this file on the new website or embed via iframe: <iframe src="/path/to/index.html" width="100%" height="600px"></iframe>
+    */
+  </script>
+</body>
+</html>
